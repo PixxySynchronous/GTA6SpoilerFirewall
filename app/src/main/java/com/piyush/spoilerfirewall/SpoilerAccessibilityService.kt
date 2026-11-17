@@ -44,7 +44,13 @@ class SpoilerAccessibilityService : AccessibilityService() {
     private var scrollGeneration = 0
     private val activeScrolls = ArrayList<Pair<Rect, Long>>()
     /** Rects revealed since the last scroll there; content at these spots was already checked. */
-    private val revealedSinceScroll = HashSet<String>()
+    private val revealedSinceScroll = HashMap<String, String>() // rect -> text signature
+
+    private val digits = Regex("\\d+")
+
+    /** Text identity ignoring numbers (like/view counts, timers); null if there's no text. */
+    private fun signature(item: ScreenItem): String? =
+        item.judgeText.takeIf { it.isNotBlank() }?.replace(digits, "#")?.let { "${item.kind}|${it.hashCode()}|${it.length}" }
     private val ocrCleared = LruSet(1500)
     private val ocrSpoiler = LruSet(1500)
     private var looseOcrSpoilerGeneration = -1
@@ -176,7 +182,10 @@ class SpoilerAccessibilityService : AccessibilityService() {
                     }
                     val src = Rect()
                     event.source?.getBoundsInScreen(src)
-                    onScroll(if (src.isEmpty) null else src)
+                    // On a full-screen page (Reel, Short, story) any swipe signal
+                    // re-covers everything at once: the app may report only an inner
+                    // view moving while the whole page slides.
+                    onScroll(if (src.isEmpty || fullScreenPageShown) null else src)
                     return
                 }
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
@@ -215,14 +224,18 @@ class SpoilerAccessibilityService : AccessibilityService() {
 
     private var lastScrollAt = 0L
 
+    /** True while a page covering most of the window (Reel/Short/story) is on screen. */
+    private var fullScreenPageShown = false
+
     private fun onScroll(region: Rect?) {
         val r = region ?: EVERYTHING
+        if (BuildConfig.DEBUG) android.util.Log.d(TAG, "scroll region=${region?.toShortString()} t=${SystemClock.uptimeMillis() % 100000}")
         scrollGeneration++
         lastScrollAt = SystemClock.uptimeMillis()
         pixelKeys.clear() // fingerprints are per generation; re-taken after the scroll settles
         if (pixelKeysBySize.size > 500) pixelKeysBySize.clear()
         activeScrolls += Rect(r) to SystemClock.uptimeMillis()
-        revealedSinceScroll.removeAll { Rect.intersects(Rect.unflattenFromString(it) ?: EVERYTHING, r) }
+        revealedSinceScroll.keys.removeAll { Rect.intersects(Rect.unflattenFromString(it) ?: EVERYTHING, r) }
         cover?.closeHolesIn(r)
         schedule(SETTLE_MS)
     }
@@ -241,6 +254,7 @@ class SpoilerAccessibilityService : AccessibilityService() {
         cover?.setBlur(null, null) // never show one app's blurred frame over another
         blurGeneration = -1
         audioGuard.hold(false)
+        fullScreenPageShown = false
         activeScrolls.clear()
         revealedSinceScroll.clear()
     }
@@ -377,12 +391,21 @@ class SpoilerAccessibilityService : AccessibilityService() {
             val key = keys[i]
             val spoiler = base == Verdict.SPOILER || (key != null && key in ocrSpoiler)
             val scrolling = activeScrolls.any { Rect.intersects(it.first, b) }
-            val ocrOk = !ocr.available || item in containers || (key != null && key in ocrCleared) ||
-                b.flattenToString() in revealedSinceScroll
+            // Shortcut: the same item (same spot, same text apart from numbers such as
+            // like counts) that was already uncovered stays uncovered without waiting
+            // for OCR. A new Reel/Short in the same spot has different text, so it
+            // does NOT get this shortcut and is covered until fully checked.
+            val sig = signature(owners[item] ?: item)
+            val sameAsBefore = sig != null && revealedSinceScroll[b.flattenToString()] == sig
+            val ocrOk = !ocr.available || item in containers || (key != null && key in ocrCleared) || sameAsBefore
             if (!spoiler && base == Verdict.SAFE && ocrOk && !scrolling) {
                 holes += b
+                if (sig != null) revealedSinceScroll[b.flattenToString()] = sig
             } else {
-                blocked += BlockedRect(b, spoiler)
+                // Blocked because something on this screen is a spoiler (e.g. the
+                // video of a Short whose caption is GTA): say so instead of "Checking…".
+                val becauseOfSpoiler = spoiler || (base == Verdict.UNKNOWN && anySpoilerOnScreen && big)
+                blocked += BlockedRect(b, becauseOfSpoiler)
                 if (!spoiler && base == Verdict.SAFE && !ocrOk && !scrolling) needOcr = true
             }
         }
@@ -390,7 +413,6 @@ class SpoilerAccessibilityService : AccessibilityService() {
         // CoverView paints blocked rects on top of holes, so a hole can never
         // expose something blocked (e.g. buttons over a hidden player).
         val finalHoles = holes
-        finalHoles.forEach { revealedSinceScroll += it.flattenToString() }
 
         c.update(areas, finalHoles, exclusions, blocked)
         if (BuildConfig.DEBUG) {
@@ -405,7 +427,9 @@ class SpoilerAccessibilityService : AccessibilityService() {
             )
         }
 
-        // Pause audio while a full-screen video (Short / Reel / player) is hidden.
+        fullScreenPageShown = items.any { it.bounds.width().toLong() * it.bounds.height() >= mainArea * 0.45 }
+
+        // Silence a full-screen video (Short / Reel / player) while it's hidden.
         val bigBlocked = blocked.any { it.rect.width().toLong() * it.rect.height() >= mainArea * 0.45 }
         audioGuard.hold(prefs.pauseVideo && bigBlocked)
 
