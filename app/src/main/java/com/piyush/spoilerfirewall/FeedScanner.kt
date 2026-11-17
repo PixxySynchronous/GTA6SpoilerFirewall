@@ -38,6 +38,7 @@ class FeedScanner {
     private var visited = 0
 
     private var trustedTextLen = Int.MAX_VALUE
+    private var windowArea = 0L
 
     /**
      * @param trustedTextLen how long an item's own text must be to identify its
@@ -54,6 +55,7 @@ class FeedScanner {
     ): List<ScreenItem> {
         visited = 0
         this.trustedTextLen = trustedTextLen
+        windowArea = windowBounds.width().toLong() * windowBounds.height()
         val out = ArrayList<ScreenItem>()
         walk(root, windowBounds, neighbourContext, generation, out, 0)
         return out
@@ -111,8 +113,9 @@ class FeedScanner {
         if (childCount == 0) {
             val own = ownText(node)
             out += if (own.isBlank()) {
-                // No text: identity comes entirely from its pixel fingerprint.
-                ScreenItem("U|${node.className}", bounds, "", ItemKind.UNLABELLED)
+                // No text: identity comes entirely from its pixel fingerprint, and it
+                // is judged by the text right around it (e.g. the miniplayer's title).
+                ScreenItem("U|${node.className}", bounds, contextFor(node), ItemKind.UNLABELLED)
             } else {
                 ScreenItem("L|${node.className}|${own.hashCode()}", bounds, own, ItemKind.LABELLED, trusted(own))
             }
@@ -122,6 +125,26 @@ class FeedScanner {
         for (i in 0 until childCount) {
             node.getChild(i)?.let { walk(it, bounds, neighbourContext, generation, out, depth + 1) }
         }
+    }
+
+    /**
+     * Text of the nearest small ancestor that has some (the miniplayer bar with
+     * its title, a card with its caption). Stops at ancestors covering half the
+     * window or more, so a picture is never "cleared" by a whole page's text.
+     * Returns "" if there's no such local context.
+     */
+    private fun contextFor(node: AccessibilityNodeInfo): String {
+        var p = node.parent
+        var depth = 0
+        while (p != null && depth < 6) {
+            val r = Rect().also(p::getBoundsInScreen)
+            if (r.width().toLong() * r.height() >= windowArea / 2) return ""
+            val t = subtreeText(p)
+            if (t.trim().length >= 15) return t
+            p = p.parent
+            depth++
+        }
+        return ""
     }
 
     private fun containsScrollable(node: AccessibilityNodeInfo, depth: Int): Boolean {

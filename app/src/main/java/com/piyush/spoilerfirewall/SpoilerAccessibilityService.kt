@@ -320,7 +320,13 @@ class SpoilerAccessibilityService : AccessibilityService() {
                     big && !screenOk -> Verdict.UNKNOWN // e.g. "Video player" on a GTA watch page
                     else -> tree[i]
                 }
-                ItemKind.UNLABELLED -> if (screenOk) Verdict.SAFE else Verdict.UNKNOWN
+                // Judged by its local context (miniplayer title, card caption) when
+                // it has one; otherwise by the whole screen as before.
+                ItemKind.UNLABELLED -> when {
+                    item.judgeText.isNotBlank() -> tree[i]
+                    screenOk -> Verdict.SAFE
+                    else -> Verdict.UNKNOWN
+                }
             }
             val key = keys[i]
             val spoiler = base == Verdict.SPOILER || (key != null && key in ocrSpoiler)
@@ -400,6 +406,9 @@ class SpoilerAccessibilityService : AccessibilityService() {
 
     private fun isProtectedWindow(w: AccessibilityWindowInfo): Boolean {
         if (w.type != AccessibilityWindowInfo.TYPE_APPLICATION) return false
+        // Picture-in-picture is a video the user chose and was already watching
+        // (it has no text to check anyway), so it is never covered.
+        if (w.isInPictureInPictureMode) return false
         val pkg = w.root?.packageName?.toString()
         if (pkg != null) {
             return if (pkg in PROTECTED_PACKAGES) {
