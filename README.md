@@ -12,6 +12,7 @@ Everything runs **on the phone**. No screenshots, text or usage data leave the d
   2. **Picture text (Android 14+):** a screenshot of *only* the app's window, so the cover itself is never captured, run through on-device OCR (Google ML Kit). This catches spoilers written on thumbnails and inside videos.
 - **What counts as blocked:** anything Grand Theft Auto. That means GTA in any form (GTA 5/V, GTA VI, GTA Online, GTA RP, #gta6…), San Andreas, Vice City, Liberty City, Los Santos, Leonida and Rockstar Games. Character names (Lucia, Jason, Trevor, Franklin…) are blocked when they appear next to words like *ending*, *mission* or *leak*.
 - **Unknown stays hidden.** If something has no readable text or hasn't been checked yet, it stays covered ("Checking…"). Matches show "Spoiler blocked".
+- **Heavy blur, not a blackout.** Covered areas show an extremely blurred copy of what's underneath: the window screenshot shrunk to ~24 px wide, smoothed, and stretched back. You see colours and layout but can't read text or recognise images. Before the first screenshot (and on Android below 14) the cover is plain dark.
 - **Scrolling.** Any scroll immediately re-covers the area that moved. Holes reopen once the list settles and the new items pass. Items it has already checked are remembered by their text and a small pixel fingerprint, so scrolling back up doesn't re-run OCR.
 - **Video.** While a full-screen Short, Reel or video is still covered, the app takes audio focus so the video pauses. A playing video is re-scanned every 2.5 s for on-screen text.
 - **Usable phone.** The cover is touch-through, so you can still scroll and tap. The nav bar, keyboard and notification shade stay visible.
@@ -58,6 +59,7 @@ To stop it, use **Turn off** in the pop-up or the switch in Accessibility settin
 | `SpoilerRules.kt` | Offline word rules (unit-tested in `app/src/test`) |
 | `OcrInspector.kt` | Window-only screenshot plus ML Kit text recognition |
 | `PixelHash.kt` | 256-bit difference hash used to recognise already-checked items |
+| `HeavyBlur.kt` | Makes the extremely blurred backdrop for covered areas |
 | `CoverView.kt` | Touch-through overlay that paints everything except cleared items |
 | `Notifier.kt`, `ActionReceiver.kt` | The on/off pop-up and its buttons |
 | `WatcherService.kt`, `BootReceiver.kt` | Shows the "OFF" pop-up when the accessibility service is disabled |

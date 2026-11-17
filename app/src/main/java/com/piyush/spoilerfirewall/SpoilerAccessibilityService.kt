@@ -192,6 +192,8 @@ class SpoilerAccessibilityService : AccessibilityService() {
         if (!protectedVisible && cover?.visibility != View.VISIBLE) return
         protectedVisible = false
         cover?.visibility = View.GONE
+        cover?.setBlur(null, null) // never show one app's blurred frame over another
+        blurGeneration = -1
         audioGuard.hold(false)
         activeScrolls.clear()
         revealedSinceScroll.clear()
@@ -358,7 +360,10 @@ class SpoilerAccessibilityService : AccessibilityService() {
         mainWindow?.let { w ->
             lastSnapshot = Snapshot(w.id, Rect().also(w::getBoundsInScreen), items, scrollGeneration, containers + owners.keys)
         }
-        if (needOcr && activeScrolls.isEmpty()) requestOcr()
+        // Also screenshot when something is covered but the blur is from before
+        // the last scroll (OCR is skipped if every item is already known).
+        val blurStale = blocked.isNotEmpty() && blurGeneration != scrollGeneration
+        if ((needOcr || blurStale) && activeScrolls.isEmpty()) requestOcr()
         if (activeScrolls.isNotEmpty()) schedule(SETTLE_MS)
     }
 
@@ -417,6 +422,9 @@ class SpoilerAccessibilityService : AccessibilityService() {
      */
     private val pixelKeys = HashMap<String, String>()
 
+    /** Scroll generation the current blurred backdrop was taken in (-1 = none). */
+    private var blurGeneration = -1
+
     /** Cache identity for an item, or null if it still needs a fingerprint. */
     private fun effectiveKey(item: ScreenItem): String? =
         if (item.textTrusted) item.key else pixelKeys[item.slot(scrollGeneration)]
@@ -448,6 +456,9 @@ class SpoilerAccessibilityService : AccessibilityService() {
                 schedule(0) // screen moved meanwhile; recompute will ask again
                 return@capture
             }
+            // Fresh heavily-blurred backdrop for the covered areas.
+            cover?.setBlur(HeavyBlur.of(shot.bitmap), snap.windowBounds)
+            blurGeneration = snap.generation
             // Fingerprint everything that isn't identified by text alone.
             val eff = HashMap<ScreenItem, String>()
             for (item in snap.items) {

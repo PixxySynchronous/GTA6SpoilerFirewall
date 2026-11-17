@@ -1,6 +1,7 @@
 package com.piyush.spoilerfirewall
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Rect
@@ -21,8 +22,25 @@ class CoverView(context: Context) : View(context) {
         color = 0xFF8E94A3.toInt()
         textAlign = Paint.Align.CENTER
         textSize = sp(15f)
+        setShadowLayer(6f, 0f, 1f, 0xCC000000.toInt()) // readable over the blur
     }
-    private val spoilerPaint = Paint(checkingPaint).apply { color = 0xFFFF6B5E.toInt() }
+    private val spoilerPaint = Paint(checkingPaint).apply { color = 0xFFFF8A80.toInt() }
+
+    // Heavy blur: a tiny (~24 px wide) smoothed copy of the app window, stretched
+    // back over the covered areas with bilinear filtering. Unreadable by design.
+    private var blur: Bitmap? = null
+    private val blurDst = Rect()
+    private val blurPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+    /** Darkens the blur slightly so labels stay readable. */
+    private val tint = Paint().apply { color = 0x66000000 }
+
+    /** @param window screen rect the blurred frame was taken from; null clears it. */
+    fun setBlur(bitmap: Bitmap?, window: Rect?) {
+        if (blur !== bitmap) blur?.recycle()
+        blur = bitmap
+        if (window != null) blurDst.set(window)
+        invalidate()
+    }
 
     private var areas: List<Rect> = emptyList()
     private var holes: List<Rect> = emptyList()
@@ -63,9 +81,14 @@ class CoverView(context: Context) : View(context) {
             for (e in exclusions) canvas.clipOutRect(e)
             canvas.save()
             for (h in holes) canvas.clipOutRect(h)
-            canvas.drawRect(area, fill)
+            paintCover(canvas, area)
             canvas.restore()
-            for (b in labels) canvas.drawRect(b.rect, fill)
+            for (b in labels) {
+                canvas.save()
+                canvas.clipRect(b.rect)
+                paintCover(canvas, b.rect)
+                canvas.restore()
+            }
             val drawn = ArrayList<Rect>()
             // Spoiler labels first so they win over overlapping "Checking…" ones.
             for (b in labels.sortedByDescending { it.spoiler }) {
@@ -84,6 +107,15 @@ class CoverView(context: Context) : View(context) {
             canvas.restore()
         }
         canvas.restore()
+    }
+
+    /** Opaque base, then the blurred frame (if any) and a light tint, within the current clip. */
+    private fun paintCover(canvas: Canvas, region: Rect) {
+        canvas.drawRect(region, fill)
+        val b = blur ?: return
+        if (b.isRecycled) return
+        canvas.drawBitmap(b, null, blurDst, blurPaint)
+        canvas.drawRect(region, tint)
     }
 
     private fun sp(v: Float) =
