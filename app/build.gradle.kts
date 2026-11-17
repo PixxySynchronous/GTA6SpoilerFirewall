@@ -11,8 +11,17 @@ android {
         applicationId = "com.piyush.spoilerfirewall"
         minSdk = 30
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3-block-by-default"
+        versionCode = 4
+        versionName = "1.0"
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            // Personal sideloaded app: signed with the local debug key so it can be
+            // installed straight from the APK (and over an existing debug install).
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
 
     buildFeatures {

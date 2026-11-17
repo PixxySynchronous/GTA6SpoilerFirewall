@@ -153,10 +153,27 @@ class SpoilerAccessibilityService : AccessibilityService() {
             return
         }
         val pkg = event.packageName?.toString()
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) checkKeyboard()
         if (pkg != null && pkg in PROTECTED_PACKAGES) {
             if (!protectedVisible) showFullCover()
             when (event.eventType) {
+                AccessibilityEvent.TYPE_VIEW_FOCUSED, AccessibilityEvent.TYPE_VIEW_CLICKED -> {
+                    // Tapping a text box: the keyboard is about to open, and the app
+                    // reports the resulting layout shift BEFORE the keyboard window
+                    // exists, so expect it now.
+                    val editable = event.className?.contains("EditText") == true ||
+                        event.source?.isEditable == true
+                    if (editable) keyboardChangedAt = SystemClock.uptimeMillis()
+                }
                 AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
+                    // The keyboard opening/closing resizes the app and shifts its
+                    // content, which arrives as scroll events. That's not new
+                    // content: keep cleared items and just re-place them.
+                    checkKeyboard()
+                    if (inKeyboardShift()) {
+                        schedule(CONTENT_DELAY_MS)
+                        return
+                    }
                     val src = Rect()
                     event.source?.getBoundsInScreen(src)
                     onScroll(if (src.isEmpty) null else src)
@@ -171,10 +188,39 @@ class SpoilerAccessibilityService : AccessibilityService() {
         schedule(CONTENT_DELAY_MS)
     }
 
+    // --- keyboard ------------------------------------------------------------
+    private var keyboardShown = false
+    private var keyboardChangedAt = 0L
+
+    private fun checkKeyboard() {
+        val shown = try {
+            windows.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        } catch (_: Exception) {
+            keyboardShown
+        }
+        if (shown != keyboardShown) {
+            keyboardShown = shown
+            val now = SystemClock.uptimeMillis()
+            keyboardChangedAt = now
+            // A "scroll" just before the keyboard appeared/disappeared was really
+            // the app resizing for it: stop waiting on it and re-place items.
+            if (now - lastScrollAt < KEYBOARD_LOOKBACK_MS) {
+                activeScrolls.clear()
+                schedule(0)
+            }
+        }
+    }
+
+    private fun inKeyboardShift() = SystemClock.uptimeMillis() - keyboardChangedAt < KEYBOARD_GRACE_MS
+
+    private var lastScrollAt = 0L
+
     private fun onScroll(region: Rect?) {
         val r = region ?: EVERYTHING
         scrollGeneration++
+        lastScrollAt = SystemClock.uptimeMillis()
         pixelKeys.clear() // fingerprints are per generation; re-taken after the scroll settles
+        if (pixelKeysBySize.size > 500) pixelKeysBySize.clear()
         activeScrolls += Rect(r) to SystemClock.uptimeMillis()
         revealedSinceScroll.removeAll { Rect.intersects(Rect.unflattenFromString(it) ?: EVERYTHING, r) }
         cover?.closeHolesIn(r)
@@ -434,9 +480,29 @@ class SpoilerAccessibilityService : AccessibilityService() {
     /** Scroll generation the current blurred backdrop was taken in (-1 = none). */
     private var blurGeneration = -1
 
+    /**
+     * Same fingerprints keyed by text + size instead of position, used only while
+     * the keyboard is shifting the layout (an item moved but didn't change).
+     */
+    private val pixelKeysBySize = HashMap<String, Pair<String, Int>>() // -> (key#hash, generation)
+
+    private fun sizeKey(item: ScreenItem) = "${item.key}|${item.bounds.width()}x${item.bounds.height()}"
+
     /** Cache identity for an item, or null if it still needs a fingerprint. */
     private fun effectiveKey(item: ScreenItem): String? =
-        if (item.textTrusted) item.key else pixelKeys[item.slot(scrollGeneration)]
+        if (item.textTrusted) item.key
+        else pixelKeys[item.slot(scrollGeneration)] ?: keyboardShiftKey(item)
+
+    /**
+     * While the keyboard is shifting the layout, an item with the same text and
+     * size as one fingerprinted just before (this or the previous generation)
+     * is the same item that moved.
+     */
+    private fun keyboardShiftKey(item: ScreenItem): String? {
+        if (!inKeyboardShift()) return null
+        val (key, gen) = pixelKeysBySize[sizeKey(item)] ?: return null
+        return key.takeIf { gen >= scrollGeneration - 1 }
+    }
 
     // --- OCR ---------------------------------------------------------------
     /**
@@ -474,7 +540,10 @@ class SpoilerAccessibilityService : AccessibilityService() {
                 if (item in snap.containers) continue
                 eff[item] = if (item.textTrusted) item.key else {
                     val h = PixelHash.of(shot.bitmap, shot.toBitmap(item.bounds)) ?: "none"
-                    "${item.key}#$h".also { pixelKeys[item.slot(snap.generation)] = it }
+                    "${item.key}#$h".also {
+                        pixelKeys[item.slot(snap.generation)] = it
+                        pixelKeysBySize[sizeKey(item)] = it to snap.generation
+                    }
                 }
             }
             val unknown = eff.values.any { it !in ocrCleared && it !in ocrSpoiler }
@@ -542,5 +611,7 @@ class SpoilerAccessibilityService : AccessibilityService() {
         private const val CONTENT_DELAY_MS = 40L
         private const val PERIODIC_OCR_MS = 2500L
         private const val OCR_RETRY_MS = 700L
+        private const val KEYBOARD_GRACE_MS = 800L
+        private const val KEYBOARD_LOOKBACK_MS = 300L
     }
 }

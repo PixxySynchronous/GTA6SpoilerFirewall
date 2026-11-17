@@ -25,6 +25,7 @@ class CoverView(context: Context) : View(context) {
         setShadowLayer(6f, 0f, 1f, 0xCC000000.toInt()) // readable over the blur
     }
     private val spoilerPaint = Paint(checkingPaint).apply { color = 0xFFFF8A80.toInt() }
+    private val hintPaint = Paint(checkingPaint).apply { color = 0xFFFFFFFF.toInt(); textSize = sp(13f) }
 
     // Heavy blur: a tiny (~24 px wide) smoothed copy of the app window, stretched
     // back over the covered areas with bilinear filtering. Unreadable by design.
@@ -98,11 +99,13 @@ class CoverView(context: Context) : View(context) {
                 val slot = Rect(r.centerX() - 300, r.centerY() - 70, r.centerX() + 300, r.centerY() + 70)
                 if (drawn.any { Rect.intersects(it, slot) }) continue
                 drawn += slot
-                canvas.drawText(
-                    if (b.spoiler) "Spoiler blocked" else "Checking…",
-                    r.exactCenterX(), r.exactCenterY(),
-                    if (b.spoiler) spoilerPaint else checkingPaint
-                )
+                if (b.spoiler) {
+                    val gap = spoilerPaint.textSize * 0.7f
+                    canvas.drawText("Spoiler blocked", r.exactCenterX(), r.exactCenterY() - gap, spoilerPaint)
+                    canvas.drawText("Please scroll away", r.exactCenterX(), r.exactCenterY() + gap, hintPaint)
+                } else {
+                    canvas.drawText("Checking…", r.exactCenterX(), r.exactCenterY(), checkingPaint)
+                }
             }
             canvas.restore()
         }
