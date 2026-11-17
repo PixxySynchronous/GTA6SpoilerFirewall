@@ -4,7 +4,7 @@ An Android app that keeps **YouTube** and **Instagram** covered and only uncover
 
 Everything runs **on the phone**. No screenshots, text or usage data leave the device.
 
-**Download:** [GTA6SpoilerFirewall-1.1.apk](https://github.com/PixxySynchronous/GTA6SpoilerFirewall/releases/latest), on the Releases page (Android 11+, OCR on Android 14+).
+**Download:** [GTA6SpoilerFirewall-1.2.apk](https://github.com/PixxySynchronous/GTA6SpoilerFirewall/releases/latest), on the Releases page (Android 11+, OCR on Android 14+).
 
 ## What it does
 
@@ -58,6 +58,7 @@ To stop it, use **Turn off** in the pop-up or the switch in Accessibility settin
 |---|---|
 | `SpoilerAccessibilityService.kt` | Watches YouTube/Instagram, decides what to cover or uncover, runs OCR, holds audio focus |
 | `FeedScanner.kt` | Splits the app's accessibility tree into checkable items (list children, labelled and unlabelled leaves) |
+| `AppProfile.kt` | Per-app settings (YouTube / Instagram) so tuning one never affects the other |
 | `SpoilerRules.kt` | Offline word rules (unit-tested in `app/src/test`) |
 | `OcrInspector.kt` | Window-only screenshot plus ML Kit text recognition |
 | `PixelHash.kt` | 256-bit difference hash used to recognise already-checked items |

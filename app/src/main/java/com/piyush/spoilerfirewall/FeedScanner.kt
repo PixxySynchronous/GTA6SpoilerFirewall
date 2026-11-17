@@ -38,6 +38,7 @@ class FeedScanner {
     private var visited = 0
 
     private var trustedTextLen = Int.MAX_VALUE
+    private var keyPrefix = ""
     private var windowArea = 0L
 
     /**
@@ -51,10 +52,12 @@ class FeedScanner {
         windowBounds: Rect,
         neighbourContext: Boolean,
         generation: Int,
-        trustedTextLen: Int
+        trustedTextLen: Int,
+        keyPrefix: String
     ): List<ScreenItem> {
         visited = 0
         this.trustedTextLen = trustedTextLen
+        this.keyPrefix = keyPrefix
         windowArea = windowBounds.width().toLong() * windowBounds.height()
         val out = ArrayList<ScreenItem>()
         walk(root, windowBounds, neighbourContext, generation, out, 0)
@@ -100,7 +103,7 @@ class FeedScanner {
                 out += ScreenItem(
                     // Own text only: neighbours change while scrolling, which used to
                     // make the same post look new and re-run OCR.
-                    key = "F|${child.className}|${own.hashCode()}|${own.length}",
+                    key = "$keyPrefix|F|${child.className}|${own.hashCode()}|${own.length}",
                     bounds = cb,
                     judgeText = judge,
                     kind = ItemKind.FEED,
@@ -115,9 +118,9 @@ class FeedScanner {
             out += if (own.isBlank()) {
                 // No text: identity comes entirely from its pixel fingerprint, and it
                 // is judged by the text right around it (e.g. the miniplayer's title).
-                ScreenItem("U|${node.className}", bounds, contextFor(node), ItemKind.UNLABELLED)
+                ScreenItem("$keyPrefix|U|${node.className}", bounds, contextFor(node), ItemKind.UNLABELLED)
             } else {
-                ScreenItem("L|${node.className}|${own.hashCode()}", bounds, own, ItemKind.LABELLED, trusted(own))
+                ScreenItem("$keyPrefix|L|${node.className}|${own.hashCode()}", bounds, own, ItemKind.LABELLED, trusted(own))
             }
             return
         }

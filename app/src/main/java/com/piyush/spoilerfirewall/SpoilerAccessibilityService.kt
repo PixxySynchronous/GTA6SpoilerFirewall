@@ -102,7 +102,7 @@ class SpoilerAccessibilityService : AccessibilityService() {
         ocr = OcrInspector(this)
         audioGuard = AudioGuard(this)
         addCoverWindow()
-        handler.postDelayed(periodicOcr, PERIODIC_OCR_MS)
+        // No periodic re-scan: only app/screen opening and scrolling trigger checks.
         WatcherService.start(this)
         schedule(0) // if YouTube/Instagram is already open, show the pop-up now
     }
@@ -160,8 +160,56 @@ class SpoilerAccessibilityService : AccessibilityService() {
         }
         val pkg = event.packageName?.toString()
         if (event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) checkKeyboard()
-        if (pkg != null && pkg in PROTECTED_PACKAGES) {
-            if (!protectedVisible) showFullCover()
+        val profile = AppProfile.of(pkg)
+        if (BuildConfig.DEBUG && profile != null && event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
+            event.eventType != AccessibilityEvent.TYPE_VIEW_SELECTED
+        ) {
+            android.util.Log.d(
+                TAG, "event ${AccessibilityEvent.eventTypeToString(event.eventType)} app=${profile::class.simpleName} " +
+                    "class=${event.className?.toString()?.substringAfterLast('.')} " +
+                    "dx=${event.scrollDeltaX} dy=${event.scrollDeltaY}"
+            )
+        }
+        if (profile != null) {
+            if (!protectedVisible) {
+                showFullCover()
+                openedAt = SystemClock.uptimeMillis()
+            }
+            // Instagram: lists report "scrolled" by 0 px after every re-layout (post
+            // loaded, video started). Those aren't scrolls; just re-evaluate.
+            if (profile.ignoreZeroDeltaScrolls &&
+                event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED &&
+                event.scrollDeltaX >= 0 - profile.minScrollPx && event.scrollDeltaX <= profile.minScrollPx &&
+                event.scrollDeltaY >= 0 - profile.minScrollPx && event.scrollDeltaY <= profile.minScrollPx &&
+                // -1/-1 means "unknown" (some views don't report deltas): treat as a real scroll
+                !(event.scrollDeltaX == -1 && event.scrollDeltaY == -1)
+            ) {
+                schedule(CONTENT_DELAY_MS)
+                return
+            }
+            // Instagram: several "new screen" reports arrive while it opens; the
+            // opening check is already running, so don't restart it for each.
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+                SystemClock.uptimeMillis() - openedAt < profile.openingGraceMs
+            ) {
+                schedule(CONTENT_DELAY_MS)
+                return
+            }
+            // YouTube: full screen on/off (button tap or rotation) re-lays out the same
+            // content; it must not count as a new screen or a scroll.
+            if (profile.fullScreenToggle && event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED &&
+                event.text.any { it.toString().contains("full screen", ignoreCase = true) }
+            ) markLayoutToggle()
+            if (profile.fullScreenToggle && (
+                    event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
+                        event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+            ) {
+                if (rotationChanged()) markLayoutToggle()
+                if (inLayoutToggle()) {
+                    schedule(CONTENT_DELAY_MS)
+                    return
+                }
+            }
             when (event.eventType) {
                 AccessibilityEvent.TYPE_VIEW_FOCUSED, AccessibilityEvent.TYPE_VIEW_CLICKED -> {
                     // Tapping a text box: the keyboard is about to open, and the app
@@ -185,7 +233,7 @@ class SpoilerAccessibilityService : AccessibilityService() {
                     // On a full-screen page (Reel, Short, story) any swipe signal
                     // re-covers everything at once: the app may report only an inner
                     // view moving while the whole page slides.
-                    onScroll(if (src.isEmpty || fullScreenPageShown) null else src)
+                    onScroll(if (src.isEmpty || (profile.fullPageSwipeCoversAll && fullScreenPageShown)) null else src)
                     return
                 }
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
@@ -196,6 +244,36 @@ class SpoilerAccessibilityService : AccessibilityService() {
         }
         schedule(CONTENT_DELAY_MS)
     }
+
+    /** When the current protected app came on screen (for its opening grace). */
+    private var openedAt = 0L
+
+    // --- full screen / rotation ----------------------------------------------
+    private var lastRotation = -1
+    private var layoutToggleAt = 0L
+    /** Whether the screen had nothing big blocked just before the toggle. */
+    private var layoutWasClear = false
+    /** Big item blocked at the last normal recompute (e.g. a covered video player). */
+    private var lastHadBigBlocked = true
+
+    private fun rotationChanged(): Boolean {
+        val rotation = try {
+            getSystemService(android.hardware.display.DisplayManager::class.java)
+                .getDisplay(android.view.Display.DEFAULT_DISPLAY)?.rotation ?: lastRotation
+        } catch (_: Exception) {
+            lastRotation
+        }
+        val changed = lastRotation != -1 && rotation != lastRotation
+        lastRotation = rotation
+        return changed
+    }
+
+    private fun markLayoutToggle() {
+        if (!inLayoutToggle()) layoutWasClear = !lastHadBigBlocked
+        layoutToggleAt = SystemClock.uptimeMillis()
+    }
+
+    private fun inLayoutToggle() = SystemClock.uptimeMillis() - layoutToggleAt < LAYOUT_TOGGLE_GRACE_MS
 
     // --- keyboard ------------------------------------------------------------
     private var keyboardShown = false
@@ -211,6 +289,9 @@ class SpoilerAccessibilityService : AccessibilityService() {
             keyboardShown = shown
             val now = SystemClock.uptimeMillis()
             keyboardChangedAt = now
+            // Everything moved: drop the kept-open areas (old positions) and let
+            // items be re-placed by identity, without a recheck.
+            stickyOpen.clear()
             // A "scroll" just before the keyboard appeared/disappeared was really
             // the app resizing for it: stop waiting on it and re-place items.
             if (now - lastScrollAt < KEYBOARD_LOOKBACK_MS) {
@@ -224,6 +305,9 @@ class SpoilerAccessibilityService : AccessibilityService() {
 
     private var lastScrollAt = 0L
 
+    /** Areas uncovered since the last scroll / new screen; kept open until the next one. */
+    private val stickyOpen = ArrayList<Rect>()
+
     /** True while a page covering most of the window (Reel/Short/story) is on screen. */
     private var fullScreenPageShown = false
 
@@ -236,6 +320,7 @@ class SpoilerAccessibilityService : AccessibilityService() {
         if (pixelKeysBySize.size > 500) pixelKeysBySize.clear()
         activeScrolls += Rect(r) to SystemClock.uptimeMillis()
         revealedSinceScroll.keys.removeAll { Rect.intersects(Rect.unflattenFromString(it) ?: EVERYTHING, r) }
+        stickyOpen.removeAll { Rect.intersects(it, r) }
         cover?.closeHolesIn(r)
         schedule(SETTLE_MS)
     }
@@ -257,6 +342,7 @@ class SpoilerAccessibilityService : AccessibilityService() {
         fullScreenPageShown = false
         activeScrolls.clear()
         revealedSinceScroll.clear()
+        stickyOpen.clear()
     }
 
     // --- core decision -----------------------------------------------------
@@ -314,12 +400,13 @@ class SpoilerAccessibilityService : AccessibilityService() {
             val area = wb.width().toLong() * wb.height()
             if (area > mainArea) { mainArea = area; mainWindow = w }
             val root = w.root ?: continue // no tree yet -> whole window stays covered
-            val instagram = root.packageName?.toString() == INSTAGRAM
+            val profile = AppProfile.of(root.packageName?.toString()) ?: continue
             items += scanner.scan(
                 root, wb,
-                neighbourContext = instagram,
+                neighbourContext = profile.neighbourContext,
                 generation = scrollGeneration,
-                trustedTextLen = if (instagram) 60 else 25
+                trustedTextLen = profile.trustedTextLen,
+                keyPrefix = profile.pkg // caches never mix the two apps
             )
         }
         // Near-full-window nodes are usually layout layers, not content. YouTube has
@@ -366,6 +453,14 @@ class SpoilerAccessibilityService : AccessibilityService() {
         val screenTextLen = items.sumOf { it.judgeText.length }
         val screenOk = !anySpoilerOnScreen && screenTextLen >= 20
 
+        // Entering/exiting full screen shows the same, already-cleared content in a new
+        // layout: keep the whole window open (until the next scroll) if nothing big
+        // was blocked before the toggle. A covered video stays covered.
+        if (inLayoutToggle() && layoutWasClear) {
+            stickyOpen.clear()
+            areas.forEach { stickyOpen += Rect(it) }
+        }
+
         val holes = ArrayList<Rect>()
         val blocked = ArrayList<BlockedRect>()
         var needOcr = false
@@ -388,9 +483,16 @@ class SpoilerAccessibilityService : AccessibilityService() {
                     else -> Verdict.UNKNOWN
                 }
             }
+            val scrolling = activeScrolls.any { Rect.intersects(it.first, b) }
+            // Only opening the app / a new screen and scrolling trigger checks. Anything
+            // inside an area already uncovered since then stays uncovered: a playing
+            // video, changing view counts or controls never re-cover it (no flicker).
+            if (!scrolling && stickyOpen.any { it.contains(b) }) {
+                holes += b
+                return@forEachIndexed
+            }
             val key = keys[i]
             val spoiler = base == Verdict.SPOILER || (key != null && key in ocrSpoiler)
-            val scrolling = activeScrolls.any { Rect.intersects(it.first, b) }
             // Shortcut: the same item (same spot, same text apart from numbers such as
             // like counts) that was already uncovered stays uncovered without waiting
             // for OCR. A new Reel/Short in the same spot has different text, so it
@@ -401,6 +503,7 @@ class SpoilerAccessibilityService : AccessibilityService() {
             if (!spoiler && base == Verdict.SAFE && ocrOk && !scrolling) {
                 holes += b
                 if (sig != null) revealedSinceScroll[b.flattenToString()] = sig
+                if (stickyOpen.none { it == b }) stickyOpen += Rect(b)
             } else {
                 // Blocked because something on this screen is a spoiler (e.g. the
                 // video of a Short whose caption is GTA): say so instead of "Checking…".
@@ -414,7 +517,7 @@ class SpoilerAccessibilityService : AccessibilityService() {
         // expose something blocked (e.g. buttons over a hidden player).
         val finalHoles = holes
 
-        c.update(areas, finalHoles, exclusions, blocked)
+        c.update(areas, finalHoles, exclusions, blocked, keepOpen = stickyOpen.toList())
         if (BuildConfig.DEBUG) {
             android.util.Log.d(
                 TAG,
@@ -428,6 +531,9 @@ class SpoilerAccessibilityService : AccessibilityService() {
         }
 
         fullScreenPageShown = items.any { it.bounds.width().toLong() * it.bounds.height() >= mainArea * 0.45 }
+        if (!inLayoutToggle()) {
+            lastHadBigBlocked = blocked.any { it.rect.width().toLong() * it.rect.height() >= mainArea * 0.15 }
+        }
 
         // Silence a full-screen video (Short / Reel / player) while it's hidden.
         val bigBlocked = blocked.any { it.rect.width().toLong() * it.rect.height() >= mainArea * 0.45 }
@@ -626,9 +732,9 @@ class SpoilerAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "SpoilerFirewall"
-        const val INSTAGRAM = "com.instagram.android"
-        const val YOUTUBE = "com.google.android.youtube"
-        val PROTECTED_PACKAGES = setOf(INSTAGRAM, YOUTUBE)
+        val INSTAGRAM = AppProfile.Instagram.pkg
+        val YOUTUBE = AppProfile.YouTube.pkg
+        val PROTECTED_PACKAGES = AppProfile.PACKAGES
 
         private val EVERYTHING = Rect(Int.MIN_VALUE / 2, Int.MIN_VALUE / 2, Int.MAX_VALUE / 2, Int.MAX_VALUE / 2)
         private const val SETTLE_MS = 160L
@@ -637,5 +743,6 @@ class SpoilerAccessibilityService : AccessibilityService() {
         private const val OCR_RETRY_MS = 700L
         private const val KEYBOARD_GRACE_MS = 800L
         private const val KEYBOARD_LOOKBACK_MS = 300L
+        private const val LAYOUT_TOGGLE_GRACE_MS = 1500L
     }
 }

@@ -52,13 +52,23 @@ class CoverView(context: Context) : View(context) {
      * Paint order: [areas] minus [holes] minus [exclusions]; then every blocked
      * rect in [labels] again (minus [exclusions]) so blocked always wins over holes.
      */
-    fun update(areas: List<Rect>, holes: List<Rect>, exclusions: List<Rect>, labels: List<BlockedRect>) {
+    fun update(
+        areas: List<Rect>,
+        holes: List<Rect>,
+        exclusions: List<Rect>,
+        labels: List<BlockedRect>,
+        keepOpen: List<Rect> = emptyList()
+    ) {
         this.areas = areas
         this.holes = holes
         this.exclusions = exclusions
         this.labels = labels
+        this.keepOpen = keepOpen
         invalidate()
     }
+
+    /** Areas already uncovered until the next scroll: blocked items never paint over them. */
+    private var keepOpen: List<Rect> = emptyList()
 
     /** Cover everything immediately (used on scroll / app entry). */
     fun coverAll(area: Rect) = update(listOf(area), emptyList(), emptyList(), emptyList())
@@ -87,6 +97,7 @@ class CoverView(context: Context) : View(context) {
             for (b in labels) {
                 canvas.save()
                 canvas.clipRect(b.rect)
+                for (k in keepOpen) canvas.clipOutRect(k)
                 paintCover(canvas, b.rect)
                 canvas.restore()
             }
@@ -96,6 +107,7 @@ class CoverView(context: Context) : View(context) {
                 val r = b.rect
                 if (r.width() < 300 || r.height() < 140) continue
                 if (!area.contains(r.centerX(), r.centerY())) continue
+                if (keepOpen.any { it.contains(r.centerX(), r.centerY()) }) continue
                 val slot = Rect(r.centerX() - 300, r.centerY() - 70, r.centerX() + 300, r.centerY() + 70)
                 if (drawn.any { Rect.intersects(it, slot) }) continue
                 drawn += slot
