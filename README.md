@@ -4,6 +4,8 @@ An Android app that keeps **YouTube** and **Instagram** covered and only uncover
 
 Everything runs **on the phone**. No screenshots, text or usage data leave the device.
 
+**Download:** [GTA6SpoilerFirewall-1.0.apk](https://github.com/PixxySynchronous/GTA6SpoilerFirewall/releases/latest), on the Releases page (Android 11+, OCR on Android 14+).
+
 ## What it does
 
 - **Blocked until cleared.** When YouTube or Instagram opens, the app window is covered. Each item (feed card, Short, Reel, story, search result, button) gets its own hole in the cover only once it passes the check.
