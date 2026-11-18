@@ -73,4 +73,8 @@ To stop it, use **Turn off** in the pop-up or the switch in Accessibility settin
 The app uses Android's accessibility service and window screenshots, which are powerful permissions. In this app:
 - they're used only while YouTube or Instagram is on screen;
 - text and screenshots are processed in memory on the device and never saved or sent anywhere;
-- the only network access is Gradle fetching the ML Kit library at build time.
+- **the app has no internet access at all.** Google's ML Kit library normally adds the
+  `INTERNET` / `ACCESS_NETWORK_STATE` permissions and a "datatransport" service that uploads
+  usage logs to Google; the manifest strips both permissions and removes those logging
+  components (`tools:node="remove"`). Text recognition uses the model bundled in the APK and
+  works fully offline.
