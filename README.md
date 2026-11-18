@@ -4,7 +4,7 @@ An Android app that keeps **YouTube** and **Instagram** covered and only uncover
 
 Everything runs **on the phone**. No screenshots, text or usage data leave the device.
 
-**Download:** [GTA6SpoilerFirewall-1.2.apk](https://github.com/PixxySynchronous/GTA6SpoilerFirewall/releases/latest), on the Releases page (Android 11+, OCR on Android 14+).
+**Download:** [GTA6SpoilerFirewall-1.3.apk](https://github.com/PixxySynchronous/GTA6SpoilerFirewall/releases/latest), on the Releases page (Android 11+, OCR on Android 14+).
 
 ## What it does
 
