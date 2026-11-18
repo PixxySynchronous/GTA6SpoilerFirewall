@@ -62,7 +62,8 @@ class SpoilerAccessibilityService : AccessibilityService() {
         val windowBounds: Rect,
         val items: List<ScreenItem>,
         val generation: Int,
-        val containers: Set<ScreenItem>
+        val containers: Set<ScreenItem>,
+        val pkg: String?
     )
 
     // --- scheduling --------------------------------------------------------
@@ -142,6 +143,7 @@ class SpoilerAccessibilityService : AccessibilityService() {
             try { getSystemService(WindowManager::class.java).removeView(it) } catch (_: Exception) {}
         }
         cover = null
+        setStoryMode(false) // removes the story touch window if a story was open
         Notifier.cancelStatus(this) // the watcher takes over and will show "OFF"
         if (::ocr.isInitialized) ocr.close()
         super.onDestroy()
@@ -173,7 +175,27 @@ class SpoilerAccessibilityService : AccessibilityService() {
         if (profile != null) {
             if (!protectedVisible) {
                 showFullCover()
+                // Start from this app's last clean screen (blurred) instead of a dark cover.
+                blurByApp[profile.pkg]?.let { (bmp, win) -> cover?.setBlur(bmp, win) }
                 openedAt = SystemClock.uptimeMillis()
+                openingPhase = true
+            }
+            if (exemptShown) {
+                // DM inbox: scrolls of any kind (contact list, animated notes) never
+                // cover anything; just look again right away. Whether we've left the
+                // inbox is decided in recompute() from where the "New Message" button
+                // is: a swipe to the feed slides it off its spot -> covered at once.
+                if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
+                    schedule(0)
+                    return
+                }
+                // Tapping a chat / tab, or a new screen: leave the inbox, cover at once.
+                if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED ||
+                    event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                ) {
+                    exemptShown = false
+                    cover?.coverAll(EVERYTHING)
+                }
             }
             // Instagram: lists report "scrolled" by 0 px after every re-layout (post
             // loaded, video started). Those aren't scrolls; just re-evaluate.
@@ -217,7 +239,16 @@ class SpoilerAccessibilityService : AccessibilityService() {
                     // exists, so expect it now.
                     val editable = event.className?.contains("EditText") == true ||
                         event.source?.isEditable == true
-                    if (editable) keyboardChangedAt = SystemClock.uptimeMillis()
+                    if (editable) {
+                        keyboardChangedAt = SystemClock.uptimeMillis()
+                    } else if (storyShown && profile.storyMarkers.isNotEmpty()) {
+                        // Story viewer: a tap left/right moves to another slide, which
+                        // isn't a scroll. Re-check the whole story now.
+                        if (BuildConfig.DEBUG) android.util.Log.d(TAG, "story tap -> recheck")
+                        openingPhase = false // user acted: profile rules apply from now
+                        onScroll(null, STORY_TAP_SETTLE_MS)
+                        return
+                    }
                 }
                 AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
                     // The keyboard opening/closing resizes the app and shifts its
@@ -233,6 +264,7 @@ class SpoilerAccessibilityService : AccessibilityService() {
                     // On a full-screen page (Reel, Short, story) any swipe signal
                     // re-covers everything at once: the app may report only an inner
                     // view moving while the whole page slides.
+                    openingPhase = false // user scrolled: profile rules apply from now
                     onScroll(if (src.isEmpty || (profile.fullPageSwipeCoversAll && fullScreenPageShown)) null else src)
                     return
                 }
@@ -247,6 +279,69 @@ class SpoilerAccessibilityService : AccessibilityService() {
 
     /** When the current protected app came on screen (for its opening grace). */
     private var openedAt = 0L
+
+    /**
+     * True from the moment the app opens until the USER first scrolls, swipes or
+     * taps a story. During it, whatever screen the app opened on gets the full
+     * check (picture scan included) regardless of profile rules: no text-only
+     * Reels, no exempt DM inbox. After it, the profile's rules apply.
+     */
+    private var openingPhase = false
+
+    /** A story viewer (per the app profile's markers) is on screen. */
+    private var storyShown = false
+
+    /** An exempt screen (Instagram DM inbox) is showing: nothing is covered. */
+    private var exemptShown = false
+
+    // ---- story-mode tap detection --------------------------------------------
+    /**
+     * Instagram sends no event for a tap on a story slide. While (and ONLY while)
+     * a story is open, a 1x1 px window in the corner is added; Android notifies it
+     * (ACTION_OUTSIDE) whenever the screen is touched elsewhere, without saying
+     * where, and the touch still goes to Instagram. It's removed as soon as the
+     * story closes, so the feed, Reels and YouTube never have it.
+     */
+    private var storyTouchWindow: View? = null
+
+    private fun setStoryMode(on: Boolean) {
+        if (on == storyShown) return
+        storyShown = on
+        val wm = getSystemService(WindowManager::class.java)
+        if (on) {
+            val watcher = object : View(this) {
+                override fun onTouchEvent(e: android.view.MotionEvent): Boolean {
+                    if (e.actionMasked == android.view.MotionEvent.ACTION_OUTSIDE) onStoryTouched()
+                    return false
+                }
+            }
+            val params = WindowManager.LayoutParams(
+                1, 1,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+                PixelFormat.TRANSLUCENT
+            ).apply { gravity = Gravity.TOP or Gravity.START }
+            try {
+                wm.addView(watcher, params)
+                storyTouchWindow = watcher
+            } catch (_: Exception) {
+                storyTouchWindow = null
+            }
+        } else {
+            storyTouchWindow?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+            storyTouchWindow = null
+        }
+    }
+
+    private fun onStoryTouched() {
+        if (!storyShown || !protectedVisible || !prefs.isProtecting()) return
+        if (keyboardShown || inKeyboardShift()) return // typing a reply
+        if (BuildConfig.DEBUG) android.util.Log.d(TAG, "story touch -> recheck")
+        openingPhase = false // user tapped the story: profile rules apply from now
+        onScroll(null, STORY_TAP_SETTLE_MS)
+    }
 
     // --- full screen / rotation ----------------------------------------------
     private var lastRotation = -1
@@ -311,18 +406,24 @@ class SpoilerAccessibilityService : AccessibilityService() {
     /** True while a page covering most of the window (Reel/Short/story) is on screen. */
     private var fullScreenPageShown = false
 
-    private fun onScroll(region: Rect?) {
+    /**
+     * Re-cover [region] (null = everything) and re-check it once it has been still
+     * for [settleMs]. Scrolls use [SETTLE_MS]; a story tap has no animation, so it
+     * only waits long enough for the new slide to draw.
+     */
+    private fun onScroll(region: Rect?, settleMs: Long = SETTLE_MS) {
         val r = region ?: EVERYTHING
         if (BuildConfig.DEBUG) android.util.Log.d(TAG, "scroll region=${region?.toShortString()} t=${SystemClock.uptimeMillis() % 100000}")
         scrollGeneration++
-        lastScrollAt = SystemClock.uptimeMillis()
+        val now = SystemClock.uptimeMillis()
+        lastScrollAt = now
         pixelKeys.clear() // fingerprints are per generation; re-taken after the scroll settles
         if (pixelKeysBySize.size > 500) pixelKeysBySize.clear()
-        activeScrolls += Rect(r) to SystemClock.uptimeMillis()
+        activeScrolls += Rect(r) to (now + settleMs) // second = when it counts as settled
         revealedSinceScroll.keys.removeAll { Rect.intersects(Rect.unflattenFromString(it) ?: EVERYTHING, r) }
         stickyOpen.removeAll { Rect.intersects(it, r) }
         cover?.closeHolesIn(r)
-        schedule(SETTLE_MS)
+        schedule(settleMs)
     }
 
     private fun showFullCover() {
@@ -340,6 +441,8 @@ class SpoilerAccessibilityService : AccessibilityService() {
         blurGeneration = -1
         audioGuard.hold(false)
         fullScreenPageShown = false
+        setStoryMode(false)
+        exemptShown = false
         activeScrolls.clear()
         revealedSinceScroll.clear()
         stickyOpen.clear()
@@ -366,7 +469,7 @@ class SpoilerAccessibilityService : AccessibilityService() {
         if (!protectedVisible) showFullCover()
 
         val now = SystemClock.uptimeMillis()
-        activeScrolls.removeAll { now - it.second >= SETTLE_MS }
+        activeScrolls.removeAll { now >= it.second }
 
         // Keyboard and full-width system windows above the app (status/nav bar, shade)
         // stay visible. Narrow system windows (e.g. Samsung's transparent Edge panel
@@ -418,6 +521,63 @@ class SpoilerAccessibilityService : AccessibilityService() {
             val huge = it.bounds.width().toLong() * it.bounds.height() >= mainArea * 0.9
             huge && (it.kind != ItemKind.FEED || it.judgeText.isBlank())
         }
+
+        // ---- Exempt screen (e.g. Instagram DM inbox): nothing covered or checked ----
+        val exemptMarkers = AppProfile.of(mainWindow?.root?.packageName?.toString())?.exemptScreenMarkers.orEmpty()
+        val screenText = items.joinToString("\n") { it.judgeText }
+        // The marker (e.g. the "New Message" pencil) must be at its normal spot: fully
+        // on screen and against the right edge. Mid-swipe to another tab it slides
+        // sideways, which ends the exemption immediately.
+        val winRight = areas.maxOfOrNull { it.right } ?: 0
+        val winLeft = areas.minOfOrNull { it.left } ?: 0
+        val exempt = !openingPhase && // opening on the inbox still gets checked once
+            exemptMarkers.isNotEmpty() && exemptMarkers.all { m ->
+                items.any { it.judgeText.contains(m) && it.bounds.left >= winLeft && it.bounds.right >= winRight - 60 }
+            }
+        if (exemptShown && !exempt) {
+            // Just left the inbox (swipe to feed etc.): cover everything and check it.
+            if (BuildConfig.DEBUG) android.util.Log.d(TAG, "left exempt screen -> cover + check")
+            exemptShown = false
+            c.coverAll(EVERYTHING)
+            onScroll(null)
+            return
+        }
+        if (exempt) {
+            if (BuildConfig.DEBUG && !exemptShown) android.util.Log.d(TAG, "exempt screen (DM inbox) -> uncovered")
+            exemptShown = true
+            setStoryMode(false)
+            c.update(emptyList(), emptyList(), emptyList(), emptyList()) // draw nothing
+            audioGuard.hold(false)
+            stickyOpen.clear()
+            return
+        }
+        exemptShown = false
+
+        // ---- Story mode (only when the app profile's story viewer is on screen) ----
+        // Everything below applies to the story slide ONLY; feed posts, Reels and
+        // YouTube are untouched.
+        val mainProfile = AppProfile.of(mainWindow?.root?.packageName?.toString())
+        val storyItems = mainProfile?.storyMarkers?.takeIf { it.isNotEmpty() }?.let { markers ->
+            items.filter { item ->
+                item.bounds.width().toLong() * item.bounds.height() >= mainArea * 0.45 &&
+                    markers.any { m -> item.judgeText.contains(m, ignoreCase = true) }
+            }
+        }.orEmpty()
+        // Slides from the same person share their text, so a story slide is never
+        // recognised by text alone: it also needs its picture fingerprint.
+        storyItems.forEach { it.textTrusted = false }
+
+        // Home feed (profile marker on screen): posts never get the Reels text-only rule.
+        val fullScanMarker = mainProfile?.fullPageScanScreenMarker.orEmpty()
+        val onFullScanScreen = fullScanMarker.isNotEmpty() && items.any { it.judgeText.contains(fullScanMarker) }
+
+        // ---- Opening phase: posts are often still loading (grey placeholder) when
+        // the app opens, so for the first few seconds everything is identified by its
+        // pixels too: a photo loading in changes them and gets checked. Ends at the
+        // user's first scroll or after OPENING_MAX_MS.
+        if (openingPhase && SystemClock.uptimeMillis() - openedAt > OPENING_MAX_MS) openingPhase = false
+        if (openingPhase) items.forEach { it.textTrusted = false }
+        setStoryMode(storyItems.isNotEmpty())
 
         val tree = items.map { SpoilerRules.evaluate(it.judgeText, if (it.kind == ItemKind.FEED) 3 else 1) }
         // Overlays that sit (70%+) on a feed post (Instagram's video surface,
@@ -487,7 +647,7 @@ class SpoilerAccessibilityService : AccessibilityService() {
             // Only opening the app / a new screen and scrolling trigger checks. Anything
             // inside an area already uncovered since then stays uncovered: a playing
             // video, changing view counts or controls never re-cover it (no flicker).
-            if (!scrolling && stickyOpen.any { it.contains(b) }) {
+            if (!scrolling && !openingPhase && stickyOpen.any { it.contains(b) }) {
                 holes += b
                 return@forEachIndexed
             }
@@ -498,8 +658,18 @@ class SpoilerAccessibilityService : AccessibilityService() {
             // for OCR. A new Reel/Short in the same spot has different text, so it
             // does NOT get this shortcut and is covered until fully checked.
             val sig = signature(owners[item] ?: item)
-            val sameAsBefore = sig != null && revealedSinceScroll[b.flattenToString()] == sig
-            val ocrOk = !ocr.available || item in containers || (key != null && key in ocrCleared) || sameAsBefore
+            val sameAsBefore = !openingPhase && sig != null && revealedSinceScroll[b.flattenToString()] == sig
+            // Reels (profile.fullPageTextOnly): a full-screen page that isn't a story is
+            // judged on its text only, like YouTube Shorts, so it shows without waiting
+            // for a screenshot + OCR. Anything sitting on it (video surface) follows it.
+            val page = owners[item] ?: item
+            val textOnlyPage = mainProfile?.fullPageTextOnly == true &&
+                !openingPhase && // the screen it opened on always gets the full check
+                !onFullScanScreen && // Home feed: tall posts still get the picture-text scan
+                page.kind == ItemKind.FEED && page !in storyItems &&
+                page.bounds.width().toLong() * page.bounds.height() >= mainArea * 0.45
+            val ocrOk = !ocr.available || item in containers || (key != null && key in ocrCleared) ||
+                sameAsBefore || textOnlyPage
             if (!spoiler && base == Verdict.SAFE && ocrOk && !scrolling) {
                 holes += b
                 if (sig != null) revealedSinceScroll[b.flattenToString()] = sig
@@ -531,6 +701,7 @@ class SpoilerAccessibilityService : AccessibilityService() {
         }
 
         fullScreenPageShown = items.any { it.bounds.width().toLong() * it.bounds.height() >= mainArea * 0.45 }
+
         if (!inLayoutToggle()) {
             lastHadBigBlocked = blocked.any { it.rect.width().toLong() * it.rect.height() >= mainArea * 0.15 }
         }
@@ -540,13 +711,20 @@ class SpoilerAccessibilityService : AccessibilityService() {
         audioGuard.hold(prefs.pauseVideo && bigBlocked)
 
         mainWindow?.let { w ->
-            lastSnapshot = Snapshot(w.id, Rect().also(w::getBoundsInScreen), items, scrollGeneration, containers + owners.keys)
+            lastSnapshot = Snapshot(
+                w.id, Rect().also(w::getBoundsInScreen), items, scrollGeneration,
+                containers + owners.keys, w.root?.packageName?.toString()
+            )
         }
         // Also screenshot when something is covered but the blur is from before
         // the last scroll (OCR is skipped if every item is already known).
-        val blurStale = blocked.isNotEmpty() && blurGeneration != scrollGeneration
-        if ((needOcr || blurStale) && activeScrolls.isEmpty()) requestOcr()
-        if (activeScrolls.isNotEmpty()) schedule(SETTLE_MS)
+        // Opening phase: keep re-fingerprinting (~every 0.35 s, screenshot rate limit)
+        // so a post that finishes loading is noticed and checked. OCR only runs when
+        // something's pixels actually changed.
+        if ((needOcr || openingPhase) && activeScrolls.isEmpty()) requestOcr()
+        if (activeScrolls.isNotEmpty()) {
+            schedule((activeScrolls.minOf { it.second } - SystemClock.uptimeMillis()).coerceAtLeast(10L))
+        }
     }
 
     // --- status pop-up -----------------------------------------------------
@@ -607,6 +785,9 @@ class SpoilerAccessibilityService : AccessibilityService() {
      */
     private val pixelKeys = HashMap<String, String>()
 
+    /** Last fully-checked, spoiler-free screen of each app, heavily blurred (backdrop). */
+    private val blurByApp = HashMap<String, Pair<android.graphics.Bitmap, Rect>>()
+
     /** Scroll generation the current blurred backdrop was taken in (-1 = none). */
     private var blurGeneration = -1
 
@@ -661,9 +842,6 @@ class SpoilerAccessibilityService : AccessibilityService() {
                 schedule(0) // screen moved meanwhile; recompute will ask again
                 return@capture
             }
-            // Fresh heavily-blurred backdrop for the covered areas.
-            cover?.setBlur(HeavyBlur.of(shot.bitmap), snap.windowBounds)
-            blurGeneration = snap.generation
             // Fingerprint everything that isn't identified by text alone.
             val eff = HashMap<ScreenItem, String>()
             for (item in snap.items) {
@@ -685,21 +863,43 @@ class SpoilerAccessibilityService : AccessibilityService() {
             )
             if (!unknown && !force) {
                 // Everything on screen was checked before: reveal without OCR.
+                keepBlurIfClean(snap, eff, shot)
                 ocr.release(shot)
                 schedule(0)
                 return@capture
             }
             ocr.recognize(shot) { lines ->
-                ocr.release(shot)
                 if (lines == null) {
+                    ocr.release(shot)
                     handler.removeCallbacks(ocrRunnable)
                     handler.postDelayed(ocrRunnable, OCR_RETRY_MS)
                     return@recognize
                 }
-                if (snap.generation == scrollGeneration) applyOcr(snap, eff, lines)
+                if (snap.generation == scrollGeneration) {
+                    applyOcr(snap, eff, lines)
+                    keepBlurIfClean(snap, eff, shot)
+                }
+                ocr.release(shot)
                 schedule(0)
             }
         }
+    }
+
+    /**
+     * The blurred backdrop only ever comes from a screen that was fully checked and
+     * had no spoiler on it: a calm, stable picture that never contains a spoiler
+     * (not even blurred). It stays put while scrolling until the next clean screen.
+     */
+    private fun keepBlurIfClean(snap: Snapshot, eff: Map<ScreenItem, String>, shot: WindowShot) {
+        if (snap.items.isEmpty()) return
+        val clean = snap.items.none { SpoilerRules.isSpoiler(it.judgeText) } &&
+            eff.values.all { it in ocrCleared && it !in ocrSpoiler } &&
+            looseOcrSpoilerGeneration != snap.generation
+        if (!clean) return
+        val blur = HeavyBlur.of(shot.bitmap)
+        cover?.setBlur(blur, snap.windowBounds)
+        snap.pkg?.let { blurByApp[it] = blur to Rect(snap.windowBounds) }
+        blurGeneration = snap.generation
     }
 
     private fun applyOcr(snap: Snapshot, eff: Map<ScreenItem, String>, lines: List<OcrLine>) {
@@ -742,6 +942,8 @@ class SpoilerAccessibilityService : AccessibilityService() {
         private const val PERIODIC_OCR_MS = 2500L
         private const val OCR_RETRY_MS = 700L
         private const val KEYBOARD_GRACE_MS = 800L
+        private const val STORY_TAP_SETTLE_MS = 50L
+        private const val OPENING_MAX_MS = 5000L
         private const val KEYBOARD_LOOKBACK_MS = 300L
         private const val LAYOUT_TOGGLE_GRACE_MS = 1500L
     }

@@ -31,6 +31,35 @@ sealed class AppProfile(val pkg: String) {
     /** On a full-screen page (Reel / Short / story), any swipe re-covers the whole screen. */
     abstract val fullPageSwipeCoversAll: Boolean
 
+    /**
+     * Text that only appears in this app's story viewer. While it's on screen, a tap
+     * (left = previous, right = next slide) or a change of the story's text re-checks,
+     * because moving between slides isn't a scroll. Empty = no story handling.
+     */
+    abstract val storyMarkers: List<String>
+
+    /**
+     * A screen showing ALL of these texts is exempt: never covered or checked, and
+     * scrolling it triggers nothing (e.g. Instagram's DM inbox, which only lists
+     * contacts). Tapping anything on it covers again before the next screen opens.
+     * Empty = no exempt screen.
+     */
+    abstract val exemptScreenMarkers: List<String>
+
+    /**
+     * Full-screen pages that aren't stories (Reels) are judged on their text only
+     * (caption, username, audio) with no picture scan, so they appear as fast as
+     * YouTube Shorts do. Stories always keep the picture check.
+     */
+    abstract val fullPageTextOnly: Boolean
+
+    /**
+     * Screens showing this text never get the text-only rule above, even for posts
+     * as tall as the screen (Instagram's Home feed: tall photo/video posts look like
+     * Reels by size but must get the picture-text scan). Empty = no such screen.
+     */
+    abstract val fullPageScanScreenMarker: String
+
     object YouTube : AppProfile("com.google.android.youtube") {
         override val trustedTextLen = 25 // titles are specific
         override val neighbourContext = false
@@ -39,6 +68,10 @@ sealed class AppProfile(val pkg: String) {
         override val openingGraceMs = 0L
         override val fullScreenToggle = true
         override val fullPageSwipeCoversAll = true
+        override val storyMarkers = emptyList<String>()
+        override val exemptScreenMarkers = emptyList<String>()
+        override val fullPageTextOnly = false // Shorts are already fast (container rule)
+        override val fullPageScanScreenMarker = ""
     }
 
     object Instagram : AppProfile("com.instagram.android") {
@@ -49,6 +82,14 @@ sealed class AppProfile(val pkg: String) {
         override val openingGraceMs = 1500L
         override val fullScreenToggle = false
         override val fullPageSwipeCoversAll = true
+        override val storyMarkers = listOf("Like Story", "Send message or reaction")
+        // DM inbox (list of contacts/chats) only, recognised by the pencil button at
+        // the top right ("New Message"), which stays while scrolling. Chats are still checked.
+        override val exemptScreenMarkers = listOf("New Message")
+        override val fullPageTextOnly = true // Reels as fast as Shorts
+        // Invisible label at the top of every Home feed screen (never on the Reels tab):
+        // feed posts always get the picture-text scan.
+        override val fullPageScanScreenMarker = "Create Instagram Home Feed"
     }
 
     companion object {

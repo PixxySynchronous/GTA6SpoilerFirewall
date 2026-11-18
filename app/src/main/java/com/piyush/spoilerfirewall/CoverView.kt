@@ -37,7 +37,7 @@ class CoverView(context: Context) : View(context) {
 
     /** @param window screen rect the blurred frame was taken from; null clears it. */
     fun setBlur(bitmap: Bitmap?, window: Rect?) {
-        if (blur !== bitmap) blur?.recycle()
+        // Not recycled here: the service keeps the last clean blur per app and reuses it.
         blur = bitmap
         if (window != null) blurDst.set(window)
         invalidate()

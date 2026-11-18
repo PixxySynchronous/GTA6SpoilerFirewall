@@ -24,7 +24,7 @@ class ScreenItem(
      * OCR result (a long, specific YouTube title). Otherwise the identity also
      * needs a pixel fingerprint of the item.
      */
-    val textTrusted: Boolean = false
+    var textTrusted: Boolean = false
 ) {
     /** Unique per position + scroll generation; used to attach a pixel fingerprint. */
     fun slot(generation: Int) = "$key@${bounds.flattenToString()}@g$generation"
